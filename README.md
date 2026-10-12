@@ -5,7 +5,6 @@
 # ProxyTool
 
 **Веб-панель для управления прокси на Windows**
-*Proxy sozlamalarini veb-sahifa orqali boshqarish vositasi*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6)
@@ -15,11 +14,10 @@
 
 [Быстрый старт](#quickstart) ·
 [Использование](#daily) ·
+[Возможности](#features) ·
 [Если не работает](#troubleshooting) ·
-[Что где лежит](#files-where) ·
 [Безопасность](#security) ·
-[O'zbekcha qo'llanma](#uz) ·
-[Fayllar](#tree) ·
+[Файлы](#tree) ·
 [Лицензия](#license) ·
 [Поддержать](#support)
 
@@ -29,8 +27,9 @@
 компьютере, автообновление по расписанию и журнал. Открывается в браузере по адресу
 **http://127.0.0.1:1805**, работает в фоне без окон и сама запускается после включения компьютера.
 
-> Раздел на русском (запуск и решение проблем) идёт первым, подробная справка по возможностям ниже написана на
-> узбекском: [перейти к узбекской части](#uz).
+- Один файл программы: [`proxy_tool.py`](proxy_tool.py)
+- Только стандартная библиотека Python: **`pip install` не нужен**
+- Только для Windows (команды `reg`, `sc`, реестр)
 
 ---
 
@@ -40,13 +39,17 @@
 |---|---|
 | 1 | [Быстрый старт](#quickstart) |
 | 2 | [Ежедневное использование](#daily) |
-| 3 | [Если что-то не работает](#troubleshooting) |
-| 4 | [Что где лежит](#files-where) |
-| 5 | [Безопасность в двух словах](#security) |
-| 6 | [Подробная справка на узбекском](#uz): возможности, запуск, автозапуск, данные, использование, удалённые ПК |
-| 7 | [Структура файлов](#tree) |
-| 8 | [Лицензия](#license) |
-| 9 | [Поддержать проект](#support) |
+| 3 | [Возможности](#features) |
+| 4 | [Как пользоваться панелью](#usage) |
+| 5 | [Запуск вручную и параметры](#run) |
+| 6 | [Автозапуск и работа в фоне](#autostart) |
+| 7 | [Удалённые компьютеры](#remote) |
+| 8 | [Где хранятся данные](#data) |
+| 9 | [Если что-то не работает](#troubleshooting) |
+| 10 | [Безопасность](#security) |
+| 11 | [Структура файлов](#tree) |
+| 12 | [Лицензия](#license) |
+| 13 | [Поддержать проект](#support) |
 
 ---
 
@@ -55,7 +58,7 @@
 ## 1. Быстрый старт (3 шага)
 
 **Нужно:** Windows 10/11 и установленный [Python 3](https://www.python.org/downloads/) (при установке поставьте
-галочку **Add python.exe to PATH**). Больше ничего: `pip install` не нужен.
+галочку **Add python.exe to PATH**). Больше ничего.
 
 1. **Один раз** запустите [`Install-Autostart.bat`](Install-Autostart.bat) (двойной щелчок). Он попросит права
    администратора и:
@@ -96,9 +99,205 @@
 
 ---
 
+<a id="features"></a>
+
+## 3. Возможности
+
+| Раздел | Что делает |
+|---|---|
+| **Исключения прокси** | **Добавляет**, **удаляет** и **читает** записи в списке `ProxyOverride` одного или многих компьютеров. Существующие записи не портит, добавляет только отсутствующие. |
+| **Автообновление** | В сети, где прокси постоянно меняется или сбрасывается, заново записывает исключения каждые N часов или минут. |
+| **Локальный прокси** | Большая неоморфная **кнопка включения и выключения**, правка адреса прокси-сервера и исключений. |
+| **Журнал** | Цветные результаты, поиск, фильтр по уровню, сохранение в `.txt`, очистка. |
+
+Действия работают на **локальном** (`localhost`) и **удалённых** (по IP) компьютерах.
+Кнопка **◐** в правом верхнем углу переключает светлую и тёмную тему.
+
+**Анимации и звуки.** Вкладки, списки и кнопки работают с плавной анимацией (при нажатии расходится волна).
+Для нажатий, переключения вкладок, добавления и удаления адресов, успеха, ошибки, включения и выключения прокси
+есть мягкие звуки (они создаются самим браузером, внешних файлов нет). Кнопка **динамика** сверху включает и
+выключает звук, выбор сохраняется в `settings.json`. Если в системе включено «уменьшить анимацию», визуальные
+эффекты отключаются.
+
+**Внешний вид.** Главное окно помещается на один экран (страница не прокручивается). Слева адреса, в середине
+исключения и автообновление, справа текущая задача и журнал. Если ввести много диапазонов IP, список прокручивается
+внутри себя (у каждого показано количество адресов), журнал тоже. Выпадающие списки и числовые поля оформлены в
+стиле сайта, а не стандартными элементами браузера.
+
+<sub>[↑ к оглавлению](#top)</sub>
+
+---
+
+<a id="usage"></a>
+
+## 4. Как пользоваться панелью
+
+### 4.1. Адреса (ввод диапазона IP вручную)
+
+- В полях **Начальный IP** и **Конечный IP** впишите границы диапазона (например, `10.145.37.1` и `10.145.37.254`)
+  и нажмите **Добавить**.
+- Если заполнить только первое поле, добавится один адрес. Туда же можно вписать CIDR (`10.0.0.0/24`) или имя хоста.
+- **Этот компьютер** добавляет `localhost`.
+- Добавленные адреса отображаются «чипами», убираются кнопкой `✕`.
+- **Потоков**: сколько компьютеров обрабатывать одновременно (по умолчанию 50). **Таймаут**: время ожидания на
+  каждый компьютер (секунды).
+
+### 4.2. Исключения прокси
+
+1. В поле «Исключения» впишите записи: `*.local; 10.145.*; <local>` (через `;` или с новой строки).
+2. **Добавить в исключения**: отсутствующие записи добавятся, существующие пропустятся со статусом «Без изменений».
+   **Удалить из исключений**: указанные записи удаляются. **Прочитать текущие**: показывает текущее значение в журнале.
+
+**Автообновление.** Выберите «Каждые N часов/минут» и нажмите **Запустить**. Первый цикл выполняется сразу,
+следующие через заданный интервал; в строке состояния видно время следующего запуска. **Остановить** прекращает
+сразу. Авторежим работает, пока запущен сервер.
+
+### 4.3. Локальный прокси
+
+Большая круглая кнопка **включает и выключает** прокси (нажата = включён). Адрес сервера (`host:port`) и исключения
+правятся в полях и записываются кнопкой **Сохранить параметры**.
+
+### 4.4. Журнал
+
+Зелёный: успешно. Красный: ошибка. Серый: изменений не потребовалось. Синий: заголовок.
+
+<sub>[↑ к оглавлению](#top)</sub>
+
+---
+
+<a id="run"></a>
+
+## 5. Запуск вручную и параметры
+
+```powershell
+cd %USERPROFILE%\Desktop\ProxyTool
+python proxy_tool.py
+```
+
+Браузер откроется сам: **http://127.0.0.1:1805**. Остановка: `Ctrl+C` в консоли.
+
+Для удалённых компьютеров откройте терминал **от имени администратора**. Если вверху страницы написано
+«Администратор», всё готово.
+
+| Действие | Нужен админ? |
+|---|---|
+| Локальный прокси (чтение, запись, исключения) | Нет (только реестр текущего пользователя) |
+| **Удалённые** компьютеры | **Да**: нужно войти под учётной записью с правами администратора на целевых компьютерах |
+
+Параметры:
+
+```
+python proxy_tool.py --port 1805     # порт
+python proxy_tool.py --no-browser    # не открывать браузер
+python proxy_tool.py --host 0.0.0.0  # открыть для сети (БЕЗ пароля! только в доверенной сети)
+```
+
+<sub>[↑ к оглавлению](#top)</sub>
+
+---
+
+<a id="autostart"></a>
+
+## 6. Автозапуск и работа в фоне (.bat-файлы)
+
+Работает без чёрного окна (через `pythonw.exe`).
+
+| Файл | Что делает |
+|---|---|
+| [**`ProxyTool.bat`**](ProxyTool.bat) | При запуске показывает меню: **`1`**: запускает сервер **в фоне, без окна** и открывает сайт в браузере (если уже работает, только откроет браузер, вторая копия не запускается). **`0`**: **останавливает (убивает)** фоновую сессию. Работает и с аргументом: `ProxyTool.bat 1` / `ProxyTool.bat 0`. |
+| [**`Install-Autostart.bat`**](Install-Autostart.bat) | Запустите **один раз** (запросит администратора). Добавляет в Windows две задачи: «ProxyTool»: при включении компьютера и входе в систему сервер сам стартует в фоне (с правами администратора, UAC не спрашивает); «ProxyTool-Watchdog»: раз в 5 минут проверяет сервер и перезапускает его, если он упал. |
+| [**`Uninstall-Autostart.bat`**](Uninstall-Autostart.bat) | Удаляет автозапуск (обе задачи) и останавливает сервер. Ваши данные (список IP, настройки) не удаляются. |
+
+**Остановка через `0`:** сервер выключается, сторож его обратно не включает (ставится метка `stopped.flag`).
+Чтобы запустить снова: `ProxyTool.bat` → `1`. При следующем входе в Windows сервер снова стартует автоматически.
+Если автозапуск установлен, `0` попросит права администратора (сервер работает с правами администратора).
+
+Рекомендуемый порядок: один раз запустите `Install-Autostart.bat`, и сайт всегда будет доступен по
+http://127.0.0.1:1805. Достаточно добавить закладку в браузере.
+
+> [!NOTE]
+> Подтверждайте `Install-Autostart.bat` как администратор **из своей учётной записи** (обычный случай, когда UAC
+> спрашивает только «Да»). Если запросят пароль отдельной админ-учётки, задача запишется на неё и не затронет
+> ваши настройки прокси.
+
+<a id="uac"></a>
+
+### Пароль в окне UAC (необязательно)
+
+[`UAC-Password.bat`](UAC-Password.bat) делает так, что при запросе прав администратора вместо «Да/Нет» требуется
+**имя пользователя и пароль** (`ConsentPromptBehaviorAdmin = 1`). После запуска появляется меню: `1` включить,
+`0` вернуть прежнее состояние, `2` показать текущее состояние (права администратора не нужны). Старое значение
+сохраняется в `%APPDATA%\ProxyTool\uac_prev.txt` и возвращается по `0`.
+
+- Это настройка **всего компьютера**: пароль будут спрашивать и другие программы. Только для ProxyTool включить нельзя.
+- На учётной записи без пароля не включится (bat сам остановится), иначе вы потеряете возможность получить права администратора.
+- Если компьютер в домене, доменная политика (GPO) может перезаписать настройку.
+- Задача автозапуска пароль не спрашивает: она заранее установлена в Планировщике с правами администратора.
+
+### Данные не теряются при выключении компьютера
+
+- Диапазоны IP и все настройки записываются в `%APPDATA%\ProxyTool\settings.json` при каждом изменении.
+- Состояние **автообновления** хранится в `auto_state.json`. Если вы нажали **Запустить**, а компьютер выключился
+  или сервер упал, при следующем старте сервера автообновление **продолжится само** (подождёт 15 секунд, пока
+  поднимется сеть; в журнале появится «ВОССТАНОВЛЕНО после перезапуска»). Если вы сами нажали **Остановить**,
+  после перезапуска оно само не включится.
+- Если сервер в фоне упадёт с ошибкой, причина запишется в `%APPDATA%\ProxyTool\crash.log`.
+
+<sub>[↑ к оглавлению](#top)</sub>
+
+---
+
+<a id="remote"></a>
+
+## 7. Как работает запись на удалённые компьютеры
+
+На целевом компьютере при необходимости запускается служба *Remote Registry*, затем изменяются все профили
+пользователей в `HKU\<SID>`. Сначала проверяются порты 445 и 135.
+
+| Сообщение (в журнале) | Причина / решение |
+|---|---|
+| Нет связи (выключен или порт закрыт) | Компьютер выключен или firewall закрыл 445/135 |
+| Не удалось запустить Remote Registry | Вы вошли не под учётной записью администратора |
+| Не удалось прочитать HKU | То же самое: нужны права администратора |
+| Профиль пользователя не найден | На целевом компьютере никто не вошёл в систему |
+| Без изменений | Не ошибка: менять ничего не требовалось |
+
+<sub>[↑ к оглавлению](#top)</sub>
+
+---
+
+<a id="data"></a>
+
+## 8. Где хранятся данные
+
+Всё лежит в папке **`%APPDATA%\ProxyTool\`** (а не в памяти браузера):
+
+| Файл | Содержимое |
+|---|---|
+| `settings.json` | Список адресов, текст исключений, потоки и таймаут, интервал автообновления, прокси-сервер, тема |
+| `auto_state.json` | Работает ли автообновление и его параметры (чтобы продолжить после перезапуска) |
+| `proxytool.log` | Полный журнал (с временем) |
+| `crash.log` | Появляется только при неожиданной ошибке |
+
+Если закрыть страницу и открыть снова или зайти из другого браузера, данные останутся на месте.
+То, что вы вводите, сохраняется само через 0,4 секунды. Чтобы всё стереть, удалите эту папку.
+
+| Что | Где |
+|---|---|
+| Программа и скрипты | папка `ProxyTool` (где лежит этот файл) |
+| Ваши данные | `%APPDATA%\ProxyTool\` |
+| Автозапуск | Планировщик заданий Windows → задачи `ProxyTool` и `ProxyTool-Watchdog` |
+
+**Полное удаление:** `Uninstall-Autostart.bat`, затем удалите папку ProxyTool и (если хотите стереть данные) папку
+`%APPDATA%\ProxyTool`.
+
+<sub>[↑ к оглавлению](#top)</sub>
+
+---
+
 <a id="troubleshooting"></a>
 
-## 3. Если что-то не работает
+## 9. Если что-то не работает
 
 > [!TIP]
 > **Первым делом запустите [`Status.bat`](Status.bat).** Он ничего не меняет, не требует прав администратора и в конце
@@ -106,7 +305,7 @@
 
 | Симптом | Причина | Что делать |
 |---|---|---|
-| Сайт не открывается (страница «не удаётся подключиться») | Сервер не запущен или остановлен вручную | `ProxyTool.bat` → **1**. Если не помогло, `Status.bat` и смотрите раздел 3 |
+| Сайт не открывается (страница «не удаётся подключиться») | Сервер не запущен или остановлен вручную | `ProxyTool.bat` → **1**. Если не помогло, запустите `Status.bat` |
 | Вместо сайта страница ошибки от прокси (например, «Connection to server failed») | Браузер ходит на `127.0.0.1` через корпоративный прокси | Добавьте `127.0.0.1;localhost` в исключения прокси (в самой программе: «Локальный прокси» → «Исключения»). Либо откройте http://localhost:1805 |
 | После перезагрузки сайт не открылся | Автозапуск не установлен, отключён, или путь устарел | `Status.bat`. Чаще всего помогает снова запустить `Install-Autostart.bat` |
 | Папку ProxyTool переместили/переименовали, обновили или переустановили Python | Задача в Планировщике хранит старые пути | Снова запустите `Install-Autostart.bat` **из новой папки**: он перезапишет задачи |
@@ -135,18 +334,46 @@
 
 ---
 
-<a id="files-where"></a>
+<a id="security"></a>
 
-## 4. Что где лежит
+## 10. Безопасность
 
-| Что | Где |
-|---|---|
-| Программа и скрипты | папка `ProxyTool` (где лежит этот файл) |
-| Ваши данные: список IP, исключения, настройки, состояние автообновления | `%APPDATA%\ProxyTool\` (`settings.json`, `auto_state.json`) |
-| Журналы | `%APPDATA%\ProxyTool\proxytool.log`, `crash.log` |
-| Автозапуск | Планировщик заданий Windows → задачи `ProxyTool` и `ProxyTool-Watchdog` |
+- По умолчанию сервер слушает **только `127.0.0.1`**: с других компьютеров к нему не подключиться.
+- Проверяются заголовки `Host` и `X-Requested-With`: чужая веб-страница не сможет через ваш браузер отправить
+  скрытую команду на этот сервер.
+- Если открыть сервер для сети через `--host 0.0.0.0`, **пароля нет**. Делайте это только в доверенной сети и
+  временно.
+- Автозапуск работает с правами администратора и не спрашивает пароль при каждом входе: так задумано, иначе
+  удалённые ПК не настроить. Доступ к самой панели есть только у программ на этом компьютере.
+- Перед массовой записью на много ПК сначала проверьте на 1–2 компьютерах кнопкой «Прочитать текущие».
 
-Скрипты в папке:
+<sub>[↑ к оглавлению](#top)</sub>
+
+---
+
+<a id="tree"></a>
+
+## 11. Структура файлов
+
+```
+ProxyTool\
+├── proxy_tool.py            # программа (сервер + веб-интерфейс)
+├── ProxyTool.bat            # запуск в фоне + открытие в браузере
+├── Install-Autostart.bat    # установка автозапуска (один раз)
+├── Uninstall-Autostart.bat  # удаление автозапуска
+├── UAC-Password.bat         # включить/вернуть запрос пароля в UAC (необязательно)
+├── Status.bat               # диагностика (ничего не меняет)
+├── status.ps1               # вспомогательный скрипт для Status.bat
+├── autostart.ps1            # вспомогательный скрипт для .bat-файлов
+├── LICENSE                  # лицензия MIT
+└── README.md                # это руководство
+
+%APPDATA%\ProxyTool\         # создаётся автоматически после первого запуска
+├── settings.json
+├── auto_state.json
+├── proxytool.log
+└── crash.log                # только при ошибке
+```
 
 | Файл | Назначение |
 |---|---|
@@ -158,303 +385,24 @@
 | [`autostart.ps1`](autostart.ps1), [`status.ps1`](status.ps1) | вспомогательные скрипты для `.bat` (запускать вручную не нужно) |
 | [`LICENSE`](LICENSE) | лицензия MIT |
 
-**Полное удаление:** `Uninstall-Autostart.bat`, затем удалите папку ProxyTool и (если хотите стереть данные) папку
-`%APPDATA%\ProxyTool`.
-
-<sub>[↑ к оглавлению](#top)</sub>
-
----
-
-<a id="security"></a>
-
-## 5. Безопасность в двух словах
-
-- Сервер слушает только `127.0.0.1`: с других компьютеров к нему не подключиться. Не запускайте с `--host 0.0.0.0`:
-  у панели нет пароля.
-- Автозапуск работает с правами администратора и не спрашивает пароль при каждом входе: так задумано, иначе
-  удалённые ПК не настроить. Доступ к самой панели есть только у программ на этом компьютере.
-- Перед массовой записью на много ПК сначала проверьте на 1–2 компьютерах кнопкой «Прочитать текущие».
-
-<sub>[↑ к оглавлению](#top)</sub>
-
----
-
-<a id="uz"></a>
-
-## 6. Подробная справка (на узбекском) / Batafsil qo'llanma
-
-**Mundarija:**
-[Imkoniyatlar](#uz-features) ·
-[Ishga tushirish](#uz-run) ·
-[Fonda ishlatish va avtozapusk](#uz-autostart) ·
-[UAC'da parol](#uac) ·
-[Ma'lumotlar yo'qolmasligi](#uz-persist) ·
-[Ma'lumotlar qayerda](#uz-data) ·
-[Foydalanish](#uz-usage) ·
-[Masofaviy kompyuterlar](#uz-remote) ·
-[Xavfsizlik](#uz-security)
-
-Proxy sozlamalarini **veb-sahifa orqali** boshqaradigan vosita (Neumorphism uslubida, interfeys to'liq **rus tilida**).
-`Network-Scanner` loyihasidagi (`NS.py`) "Proxy istisnolari" moduli tkinter'dan ajratib olingan va
-`http://127.0.0.1:1805` da ochiladigan veb-saytga aylantirilgan.
-
-- Bitta fayl: [`proxy_tool.py`](proxy_tool.py)
-- Faqat Python standart kutubxonasi (**`pip install` kerak emas**)
-- Faqat Windows uchun (registry, `reg`, `sc` buyruqlari)
-
-<a id="uz-features"></a>
-
-### Imkoniyatlar
-
-| Bo'lim | Vazifasi |
-|---|---|
-| **Исключения прокси** | Bir yoki ko'p kompyuterning `ProxyOverride` ro'yxatiga yozuv **qo'shadi**, **olib tashlaydi**, joriy holatini **o'qiydi**. Mavjud yozuvlarni buzmaydi, faqat yo'qlarini qo'shadi. |
-| **Автообновление** | Proxy doimiy o'zgarib/tozalanib turadigan tarmoqda yozuvlarni har N soat/daqiqada qayta tiqib turadi. |
-| **Локальный прокси** | Katta neumorphic **yoqish/o'chirish tugmasi**, proxy server manzili va istisnolarini tahrirlash. |
-| **Журнал** | Rangli natijalar, qidiruv, daraja bo'yicha filtr, `.txt` ga saqlash, tozalash. |
-
-Amallar **lokal** (`localhost`) va **masofaviy** (IP bo'yicha) kompyuterlarda ishlaydi.
-Tepada o'ng burchakdagi **◐** tugmasi yorug'/qorong'i temani almashtiradi.
-
-**Animatsiya va ovozlar:** vkladkalar, ro'yxatlar va tugmalar silliq animatsiya bilan ishlaydi (bosganda to'lqin
-effekti). Bosish, vkladka almashtirish, manzil qo'shish/o'chirish, muvaffaqiyat, xato, proxy yoqish/o'chirish
-uchun yumshoq ovozlar bor (brauzerning o'zida hosil qilinadi, tashqi fayl yo'q). Tepadagi **dinamik** tugmasi
-ovozni o'chirib-yoqadi, tanlov `settings.json` da saqlanadi. Tizimda "animatsiyani kamaytirish" yoqilgan
-bo'lsa, vizual effektlar o'chadi.
-
-**Ko'rinish:** asosiy oyna bitta ekranga sig'adi (sahifa scroll qilinmaydi). Chapda manzillar, o'rtada
-istisnolar va avto-yangilash, o'ngda joriy vazifa va jurnal. Ko'p IP diapazon kiritsangiz, ro'yxat
-o'z ichida scroll bo'ladi (har biri nechta manzil ekanini ko'rsatadi); jurnal ham o'z ichida scroll bo'ladi.
-Tanlov ro'yxatlari va raqam maydonlari ham sayt dizaynida (brauzerning standart elementlari emas).
-
-<sub>[↑ к оглавлению](#top)</sub>
-
----
-
-<a id="uz-run"></a>
-
-### Ishga tushirish
-
-```powershell
-cd %USERPROFILE%\Desktop\ProxyTool
-python proxy_tool.py
-```
-
-Brauzer o'zi ochiladi: **http://127.0.0.1:1805**. To'xtatish: konsolda `Ctrl+C`.
-
-Masofaviy kompyuterlar uchun terminalni **administrator** sifatida oching. Sahifa tepasida
-"Администратор" yozuvi chiqsa, hammasi tayyor.
-
-| Amal | Admin kerakmi? |
-|---|---|
-| Lokal proxy (o'qish/yozish, istisnolar) | Yo'q (faqat joriy foydalanuvchi registri) |
-| **Masofaviy** kompyuterlar | **Ha**: maqsad kompyuterda admin huquqli hisob bilan kirgan bo'lishingiz kerak |
-
-Parametrlar:
-
-```
-python proxy_tool.py --port 1805     # port
-python proxy_tool.py --no-browser    # brauzerni ochmaslik
-python proxy_tool.py --host 0.0.0.0  # tarmoqdan ochiq (parolsiz! faqat ishonchli tarmoqda)
-```
-
----
-
-<a id="uz-autostart"></a>
-
-### Fonda ishlatish va avtozapusk (.bat fayllar)
-
-Qora oynasiz ishlaydi (`pythonw.exe` orqali).
-
-| Fayl | Nima qiladi |
-|---|---|
-| [**`ProxyTool.bat`**](ProxyTool.bat) | Ishga tushirganda menyu chiqadi: **`1`**: serverni **oynasiz, fonda** ishga tushiradi va brauzerda saytni ochadi (allaqachon ishlayotgan bo'lsa, faqat brauzerni ochadi, ikkinchi nusxa ochilmaydi). **`0`**: fondagi sessiyani **to'xtatadi (kill)**. Argument bilan ham ishlaydi: `ProxyTool.bat 1` / `ProxyTool.bat 0`. |
-| [**`Install-Autostart.bat`**](Install-Autostart.bat) | **Bir marta** ishga tushiring (administrator so'raydi). Windows'ga ikkita vazifa qo'shadi: "ProxyTool": kompyuter yonib, tizimga kirilganda server o'zi fonda ishga tushadi (administrator huquqi bilan, UAC so'ramaydi); "ProxyTool-Watchdog": har 5 daqiqada tekshiradi va server ishdan chiqqan bo'lsa, qayta ishga tushiradi. |
-| [**`Uninstall-Autostart.bat`**](Uninstall-Autostart.bat) | Avtozapuskni (ikkala vazifani) o'chiradi va serverni to'xtatadi. Ma'lumotlaringiz (IP ro'yxat, sozlamalar) o'chmaydi. |
-
-**`0` bilan to'xtatganda:** server o'chadi va watchdog uni qayta yoqmaydi (`stopped.flag` belgisi qo'yiladi).
-Qayta yoqish: `ProxyTool.bat` → `1`. Keyingi safar Windows'ga kirganingizda server avtomatik yana ishga tushadi.
-Avtozapusk o'rnatilgan bo'lsa, `0` administrator huquqini so'raydi (server administrator huquqi bilan ishlagani uchun).
-
-Tavsiya etilgan tartib: `Install-Autostart.bat` ni bir marta ishga tushiring, keyin sayt har doim
-http://127.0.0.1:1805 da tayyor turadi. Brauzerga yorliq (закладка) qo'yib qo'ysangiz bo'ldi.
-
-> [!NOTE]
-> `Install-Autostart.bat` ni **o'zingizning hisobingizdan** administrator sifatida tasdiqlang
-> (UAC'da parol so'ramay "Ha" bosiladigan odatdagi holat). Agar alohida admin hisob paroli so'ralsa, vazifa
-> o'sha hisobga yoziladi va sizning proxy sozlamalaringizga tegmaydi.
-
-<a id="uac"></a>
-
-#### UAC'da parol so'rash (ixtiyoriy)
-
-[`UAC-Password.bat`](UAC-Password.bat) administrator huquqi so'ralganda "Ha/Yo'q" o'rniga **foydalanuvchi nomi + parol**
-so'raladigan qiladi (`ConsentPromptBehaviorAdmin = 1`). Ishga tushirgach menyu chiqadi: `1` yoqish, `0` avvalgi holatga
-qaytarish, `2` hozirgi holatni ko'rish (administrator kerak emas). Eski qiymat `%APPDATA%\ProxyTool\uac_prev.txt` ga
-saqlanadi va `0` bilan qaytariladi.
-
-- Bu **butun kompyuterning** sozlamasi: boshqa dasturlar ham parol so'raydi. Faqat ProxyTool uchun alohida yoqib bo'lmaydi.
-- Parolsiz hisobda yoqilmaydi (bat o'zi to'xtatadi), aks holda administrator huquqini ololmay qolasiz.
-- Kompyuter domenda bo'lsa, domen siyosati (GPO) sozlamani qayta yozib qo'yishi mumkin.
-- Avtozapusk vazifasi parol so'ramaydi: u Planirovshchikda oldindan administrator huquqi bilan o'rnatilgan.
-
-<a id="uz-persist"></a>
-
-#### Kompyuter o'chib-yonganda ma'lumotlar yo'qolmaydi
-
-- IP diapazonlar va barcha sozlamalar har o'zgarishda `%APPDATA%\ProxyTool\settings.json` ga yoziladi.
-- **Avto-yangilash** (real-time) holati `auto_state.json` da saqlanadi. **Запустить** bosilgan bo'lsa va
-  kompyuter o'chib/yonsa yoki server uzilsa, server qayta ishga tushganda avto-yangilash **o'zi davom etadi**
-  (tarmoq ko'tarilishi uchun 15 soniya kutadi, jurnalda "ВОССТАНОВЛЕНО после перезапуска" yoziladi).
-  Faqat **Остановить** tugmasini o'zingiz bossangiz, qayta ishga tushganda u o'z-o'zidan yonmaydi.
-- Server fonda xatoga uchrasa, sabab `%APPDATA%\ProxyTool\crash.log` ga yoziladi.
-
-<sub>[↑ к оглавлению](#top)</sub>
-
----
-
-<a id="uz-data"></a>
-
-### Ma'lumotlar qayerda saqlanadi
-
-Hammasi **`%APPDATA%\ProxyTool\`** papkasida (brauzer xotirasida emas):
-
-| Fayl | Mazmuni |
-|---|---|
-| `settings.json` | Manzillar ro'yxati, istisnolar matni, oqim/kutish, avto-interval, proxy server, tema |
-| `auto_state.json` | Avto-yangilash ishlab turibdimi va uning parametrlari (qayta ishga tushganda davom etish uchun) |
-| `proxytool.log` | To'liq jurnal (vaqt bilan) |
-| `crash.log` | Faqat kutilmagan xato bo'lsa paydo bo'ladi |
-
-Sahifani yopib qayta ochsangiz yoki boshqa brauzerdan kirsangiz ham, ma'lumotlar joyida turadi.
-Kiritganingiz 0,4 soniyada o'zi saqlanadi. Hammasini tozalash uchun shu papkani o'chirib tashlang.
-
----
-
-<a id="uz-usage"></a>
-
-### Foydalanish
-
-#### 1. Manzillar (IP diapazonni qo'lda kiritish)
-
-- **Начальный IP** va **Конечный IP** maydonlariga diapazon chegaralarini yozing
-  (masalan `10.145.37.1` va `10.145.37.254`) va **Добавить** bosing.
-- Faqat birinchi maydonni to'ldirsangiz, bitta manzil qo'shiladi. U yerga CIDR (`10.0.0.0/24`)
-  yoki host nomini ham yozish mumkin.
-- **Этот компьютер** `localhost` ni qo'shadi.
-- Qo'shilganlar "chip" ko'rinishida chiqadi, `✕` bilan olib tashlanadi.
-- **Потоков**: bir vaqtda nechta kompyuter (standart 50). **Таймаут**: har biri uchun kutish (soniya).
-
-#### 2. Исключения прокси
-
-1. "Исключения" maydoniga yozuvlarni kiriting: `*.local; 10.145.*; <local>` (`;` yoki yangi qator bilan).
-2. **Добавить в исключения**: yo'qlari qo'shiladi, borlari "Без изменений" deb o'tkaziladi.
-   **Удалить из исключений**: ko'rsatilganlar o'chadi. **Прочитать текущие**: hozirgi qiymatni jurnalda ko'rsatadi.
-
-**Автообновление:** "Каждые N часов/минут" ni tanlab **Запустить** bosing. Birinchi sikl darrov
-bajariladi, keyingilari belgilangan oraliqda; holat satrida keyingi ishga tushish vaqti ko'rinadi.
-**Остановить** darrov to'xtatadi. Avto-rejim server ochiq turganida ishlaydi.
-
-#### 3. Локальный прокси
-
-Katta yumaloq tugma proxy'ni **yoqadi/o'chiradi** (bosilgan = yoqilgan). Server (`host:port`) va
-istisnolarni tahrirlab, **Сохранить параметры** bilan yozib qo'yasiz.
-
-#### 4. Журнал
-
-Yashil: muvaffaqiyatli. Qizil: xato. Kulrang: o'zgarish kerak bo'lmadi. Ko'k: sarlavha.
-
-<sub>[↑ к оглавлению](#top)</sub>
-
----
-
-<a id="uz-remote"></a>
-
-### Masofaviy kompyuterlar qanday ishlaydi
-
-Maqsad kompyuterda *Remote Registry* xizmatini kerak bo'lsa ishga tushiradi va `HKU\<SID>` ostidagi
-barcha foydalanuvchi profillarini o'zgartiradi. Oldin 445 va 135 portlar tekshiriladi.
-
-| Xabar (jurnalda) | Sabab / yechim |
-|---|---|
-| Нет связи (выключен или порт закрыт) | Kompyuter o'chiq yoki firewall 445/135 ni yopgan |
-| Не удалось запустить Remote Registry | Admin huquqli hisob bilan kirmagansiz |
-| Не удалось прочитать HKU | Xuddi shu: admin huquqi kerak |
-| Профиль пользователя не найден | Maqsad kompyuterda hech kim tizimga kirmagan |
-| Без изменений | Xato emas, o'zgartirish shart bo'lmadi |
-
----
-
-<a id="uz-security"></a>
-
-### Xavfsizlik
-
-- Standart holatda server **faqat `127.0.0.1`** da tinglaydi.
-- `Host` va `X-Requested-With` sarlavhalari tekshiriladi: boshqa veb-sahifa brauzeringiz orqali bu
-  serverga yashirin buyruq yubora olmaydi.
-- `--host 0.0.0.0` bilan tarmoqqa ochsangiz **parol yo'q**. Faqat ishonchli tarmoqda, vaqtincha ishlating.
-- Ko'p kompyuterga yozishdan oldin **Прочитать текущие** bilan kichik guruhda sinab ko'ring.
-
-<sub>[↑ к оглавлению](#top)</sub>
-
----
-
-<a id="tree"></a>
-
-## 7. Структура файлов / Fayllar
-
-```
-ProxyTool\
-├── proxy_tool.py            # dastur (server + veb-interfeys)
-├── ProxyTool.bat            # fonda ishga tushirish + brauzerda ochish
-├── Install-Autostart.bat    # avtozapusk o'rnatish (bir marta)
-├── Uninstall-Autostart.bat  # avtozapuskni olib tashlash
-├── UAC-Password.bat         # UAC da parol so'rashni yoqish/qaytarish (ixtiyoriy)
-├── Status.bat               # diagnostika (hech narsani o'zgartirmaydi)
-├── status.ps1               # Status.bat yordamchisi
-├── autostart.ps1            # yuqoridagi .bat fayllarning yordamchisi
-├── LICENSE                  # MIT litsenziyasi
-└── README.md                # shu qo'llanma
-
-%APPDATA%\ProxyTool\         # ishga tushgach avtomatik yaratiladi
-├── settings.json
-├── auto_state.json
-├── proxytool.log
-└── crash.log                # faqat xato bo'lsa
-```
-
-Ссылки на файлы: [`proxy_tool.py`](proxy_tool.py) ·
-[`ProxyTool.bat`](ProxyTool.bat) ·
-[`Install-Autostart.bat`](Install-Autostart.bat) ·
-[`Uninstall-Autostart.bat`](Uninstall-Autostart.bat) ·
-[`UAC-Password.bat`](UAC-Password.bat) ·
-[`Status.bat`](Status.bat) ·
-[`status.ps1`](status.ps1) ·
-[`autostart.ps1`](autostart.ps1) ·
-[`LICENSE`](LICENSE)
-
 <sub>[↑ к оглавлению](#top)</sub>
 
 ---
 
 <a id="license"></a>
 
-## 8. Лицензия / Litsenziya
+## 12. Лицензия
 
-Проект распространяется по лицензии **MIT**: можно свободно использовать, изменять и распространять, сохраняя
-уведомление об авторстве. Полный текст: [`LICENSE`](LICENSE).
-
-Loyiha **MIT** litsenziyasi ostida tarqatiladi: erkin foydalanish, o'zgartirish va tarqatish mumkin, faqat mualliflik
-yozuvi saqlanishi kerak. To'liq matn: [`LICENSE`](LICENSE).
+Проект распространяется по лицензии **MIT**: его можно свободно использовать (в том числе в коммерческих целях),
+изменять и распространять. Нужно лишь сохранять уведомление об авторстве. Полный текст: [`LICENSE`](LICENSE).
 
 ---
 
 <a id="support"></a>
 
-## 9. Поддержать проект / Loyihani qo'llab-quvvatlash
+## 13. Поддержать проект
 
-Если ProxyTool оказался полезным, можно поддержать автора. Loyiha sizga foyda keltirgan bo'lsa, muallifni
-qo'llab-quvvatlashingiz mumkin:
+Если ProxyTool оказался полезным, можно поддержать автора:
 
 <div align="center">
 
