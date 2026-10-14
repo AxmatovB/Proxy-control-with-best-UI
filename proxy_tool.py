@@ -353,6 +353,40 @@ def _remote_set_override(ip, sid, val, timeout=10):
     return rc == 0
 
 
+def _remote_get_raw(ip, sid, name, timeout=8):
+    """Значение из HKU\\<sid>\\Internet Settings: строка или число; None — нет значения."""
+    path = f"\\\\{ip}\\HKU\\{sid}\\{INET_PATH}"
+    out, rc = _run(["reg", "query", path, "/v", name], timeout)
+    if rc != 0:
+        return None
+    m = re.search(rf"{name}\s+REG_(?:SZ|DWORD)\s+(.*)", out.replace("\x00", ""))
+    return m.group(1).strip() if m else None
+
+
+def _remote_enable_proxy(ip, sid, timeout=8):
+    """-> on | enabled | fail"""
+    if _remote_get_raw(ip, sid, "ProxyEnable", timeout) in ("0x1", "1"):
+        return "on"
+    path = f"\\\\{ip}\\HKU\\{sid}\\{INET_PATH}"
+    _, rc = _run(["reg", "add", path, "/v", "ProxyEnable", "/t", "REG_DWORD",
+                  "/d", "1", "/f"], timeout)
+    return "enabled" if rc == 0 else "fail"
+
+
+def _local_enable_proxy():
+    """-> on | enabled | fail. Включает прокси независимо от наличия сервера."""
+    if _local_get_value("ProxyEnable", 0) == 1:
+        return "on"
+    return "enabled" if _local_set_value("ProxyEnable", 1, winreg.REG_DWORD) else "fail"
+
+
+def _enable_prefix(states):
+    """Текст-приставка к результату по итогам включения прокси."""
+    if "enabled" in states:
+        return "Прокси включён; "
+    return ""
+
+
 def _merge(current, new_entries):
     existing = [e.strip() for e in current.split(";") if e.strip()]
     added = []
@@ -390,22 +424,33 @@ def proxy_add(ip, entries, timeout=5.0):
     entries = [e.strip() for e in entries if e.strip()]
     if not entries:
         return True, "Нет записей для добавления"
+    # Сначала включаем прокси, и только потом добавляем исключения.
     if is_local(ip):
+        st = _local_enable_proxy()
+        if st == "fail":
+            return False, "Не удалось включить прокси — исключения не добавлены"
+        pre = _enable_prefix([st])
         cur = _local_get_override()
         if cur is None:
             return False, "Не удалось открыть локальный реестр"
         new_val, added = _merge(cur, entries)
         if not added:
-            return True, f"{NOCHG}: все записи уже есть"
+            return True, (f"[локально] {pre}записи уже есть" if st == "enabled"
+                          else f"{NOCHG}: {pre}все записи уже есть")
         if _local_set_override(new_val):
-            return True, f"[локально] Добавлено: {', '.join(added)}"
+            return True, f"[локально] {pre}Добавлено: {', '.join(added)}"
         return False, "Ошибка записи в локальный реестр (нет прав?)"
 
     sids, err = _remote_prepare(ip, timeout)
     if err:
         return False, err
-    all_added, fail = [], 0
+    all_added, states, fail = [], [], 0
     for sid in sids:
+        st = _remote_enable_proxy(ip, sid, timeout)
+        states.append(st)
+        if st == "fail":
+            fail += 1
+            continue                      # прокси не включился — исключения не пишем
         cur = _remote_get_override(ip, sid, timeout)
         new_val, added = _merge(cur, entries)
         if not added:
@@ -414,11 +459,14 @@ def proxy_add(ip, entries, timeout=5.0):
             all_added.extend(added)
         else:
             fail += 1
+    pre = _enable_prefix(states)
     if all_added:
-        return True, f"Добавлено: {', '.join(sorted(set(all_added)))}"
+        return True, f"{pre}Добавлено: {', '.join(sorted(set(all_added)))}"
     if fail:
-        return False, "Ошибка записи в реестр"
-    return True, f"{NOCHG}: все записи уже есть"
+        return False, "Ошибка записи в реестр (прокси/исключения)"
+    if "enabled" in states:
+        return True, f"{pre}записи уже есть"
+    return True, f"{NOCHG}: {pre}все записи уже есть"
 
 
 def proxy_remove(ip, entries, timeout=5.0):
