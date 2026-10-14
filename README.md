@@ -38,10 +38,24 @@
 перезапустите: `ProxyTool.bat` → **0**, затем `ProxyTool.bat` → **1**. Иначе продолжит работать старая версия
 (`Status.bat` показывает это предупреждением).
 
-**Прокси включается автоматически.** Кнопка «Добавить» и автообновление на каждом компьютере из списка (своём и
-удалённых) сначала **включают прокси** (даже если сервер не задан), и только потом добавляют исключения. Уже
-включённый прокси не трогается; если включить не удалось, исключения не пишутся и в журнале ошибка. Выключение в эту
-операцию не входит. Автообновление включает прокси заново каждый цикл.
+**Включать ли прокси.** «Добавить» и «Запустить» (автообновление) работают сразу по всем интервалам. Рядом с каждой
+из этих кнопок есть индикатор **«прокси: вкл / выкл»**. Его можно переключить кликом по индикатору или **правой
+кнопкой** по самой кнопке («Включать прокси»). «Вкл» (по умолчанию) — на каждом компьютере сначала **включить прокси**
+(даже если сервер не задан), и только потом добавить исключения; уже включённый прокси не трогается, а если включить не
+удалось, исключения не пишутся и в журнале ошибка. «Выкл» — только добавить исключения, состояние прокси не меняется.
+У «Добавить» и «Запустить» переключатели независимые, оба сохраняются. При «вкл» автообновление включает прокси заново
+каждый цикл. Отдельного выключения прокси на удалённых ПК нет (на этом компьютере — вкладка «Локальный прокси»).
+
+**Интервалы адресов.** Правая кнопка по интервалу в списке открывает меню из двух пунктов: «Изменить…» и «Удалить».
+**Двойной клик** по интервалу открывает окно со всеми его IP и закреплённой сверху строкой поиска. Отмеченные адреса
+**пропускаются** («Добавить», «Прочитать», «Удалить» и автообновление к ним не обращаются). Кнопки «Пропускать найденные» /
+«Не пропускать найденные» работают по результатам поиска. IP показываются в три колонки (по 500 штук, дальше «Показать
+ещё»). Список хранится в `settings.json` (`skips`) и
+читается при каждом запуске, поэтому изменения действуют и на уже запущенное автообновление со следующего цикла.
+
+**Стоп.** Кнопка «Стоп (прервать всё)» и «Остановить» в автообновлении полностью убивают процесс: цикл завершается,
+очередь адресов отменяется, запущенные `reg`/`sc` завершаются, открытые сокеты закрываются. После этого запросы
+на адреса больше не уходят.
 
 **Автообновление** (раздел «Автообновление» на сайте) сохраняет своё состояние: если вы нажали «Запустить» и компьютер
 выключился или сервер упал, после запуска сервера оно **продолжится само** (через ~15 секунд, чтобы поднялась сеть).
@@ -251,7 +265,11 @@ Kiritganingiz 0,4 soniyada o'zi saqlanadi. Hammasini tozalash uchun shu papkani 
 - Faqat birinchi maydonni to'ldirsangiz, bitta manzil qo'shiladi. U yerga CIDR (`10.0.0.0/24`)
   yoki host nomini ham yozish mumkin.
 - **Этот компьютер** — `localhost` ni qo'shadi.
-- Qo'shilganlar "chip" ko'rinishida chiqadi, `✕` bilan olib tashlanadi.
+- Qo'shilganlar ro'yxatda chiqadi, `✕` bilan olib tashlanadi. **O'ng tugma** — "Изменить…" / "Удалить".
+- **Ikki marta bosish** — intervalning barcha IP lari **3 ustunda** ochiladi (tepada qotirilgan qidiruv paneli bilan).
+  Tumbler yoqilgan IP lar **chetlab o'tiladi**: Добавить, Удалить, Прочитать va avtoyangilash ularga so'rov yubormaydi.
+  "Пропускать найденные" / "Не пропускать найденные" qidiruv natijasiga birdan ishlaydi. Ro'yxat `settings.json`
+  dagi `skips` da saqlanadi va avtoyangilashda har siklda qayta o'qiladi.
 - **Потоков** — bir vaqtda nechta kompyuter (standart 50), **Таймаут** — har biri uchun kutish (soniya).
 
 ### 2. Исключения прокси
@@ -260,12 +278,15 @@ Kiritganingiz 0,4 soniyada o'zi saqlanadi. Hammasini tozalash uchun shu papkani 
 2. **Добавить в исключения** — yo'qlari qo'shiladi, borlari "Без изменений" deb o'tkaziladi.
    **Удалить из исключений** — ko'rsatilganlar o'chadi. **Прочитать текущие** — hozirgi qiymatni jurnalda ko'rsatadi.
 
-**Proksi avtomatik yoqiladi (yangi):** **Добавить** va avtoyangilash har bir kompyuterda (lokal ham, masofaviy ham)
-avval proksini **yoqadi** (`ProxyEnable=1`), keyin yozuvlarni ro'yxatga qo'shadi. Proksi allaqachon yoqilgan bo'lsa,
-tegmaydi. Proksi serveri kiritilmagan bo'lsa ham yoqadi. Yoqib bo'lmasa (reestr xatosi), yozuvlar qo'shilmaydi va
-jurnalda xato chiqadi. Jurnalda: `Прокси включён; Добавлено: ...`. Proksini o'chirish bu amalga kirmaydi
-(o'chirish: "Локальный прокси" vkladkasidagi tugma). Avtoyangilash har siklda proksini qayta yoqadi, shuning
-uchun uni qo'lda o'chirsangiz, keyingi siklda yana yoqiladi.
+**Proksini yoqish (indikator):** **Добавить** va **Запустить** tugmalari yonida **"прокси: вкл / выкл"** indikatori bor.
+Uni bosish yoki tugmaning o'zida **o'ng tugma → "Включать прокси"** bilan almashtiriladi (ikkalasi alohida, saqlanadi).
+**Вкл** (standart): har bir kompyuterda (lokal ham, masofaviy ham) avval proksini **yoqadi** (`ProxyEnable=1`), keyin
+yozuvlarni qo'shadi. Proksi allaqachon yoqilgan bo'lsa, tegmaydi; server kiritilmagan bo'lsa ham yoqadi. Yoqib bo'lmasa
+(reestr xatosi), yozuvlar qo'shilmaydi va jurnalda xato chiqadi. Jurnalda: `Прокси включён; Добавлено: ...`.
+**Выкл**: faqat yozuvlar qo'shiladi, proksi holatiga tegilmaydi. Avtoyangilash "вкл" bo'lsa har siklda proksini qayta
+yoqadi, shuning uchun uni qo'lda o'chirsangiz, keyingi siklda yana yoqiladi.
+**Стоп:** "Стоп (прервать всё)" va "Остановить" jarayonni to'liq o'ldiradi: navbat bekor qilinadi, ishlayotgan
+`reg`/`sc` jarayonlari va socketlar yopiladi, shundan keyin hech qaysi IP ga so'rov ketmaydi.
 
 **Автообновление:** "Каждые N часов/минут" ni tanlab **Запустить** bosing. Birinchi sikl darrov
 bajariladi, keyingilari belgilangan oraliqda; holat satrida keyingi ishga tushish vaqti ko'rinadi.

@@ -49,6 +49,9 @@ STOP_FLAG = os.path.join(DATA_DIR, "stopped.flag")   # создаётся при
 
 DEFAULT_SETTINGS = {
     "targets": [],          # список строк: "10.0.0.5", "10.0.0.1-10.0.0.50", "10.0.0.0/24", "localhost"
+    "add_proxy": "1",       # "1" — кнопка «Добавить» сначала включает прокси, "0" — только добавляет
+    "auto_proxy": "1",      # то же для кнопки «Запустить» (автообновление)
+    "skips": [],            # IP-адреса, которые все операции обходят (отмечаются в окне интервала)
     "entries": "",          # исключения прокси (через ; или с новой строки)
     "workers": "50",
     "timeout": "5",
@@ -81,6 +84,12 @@ def load_settings():
     return data
 
 
+def norm_target(x):
+    """Запись интервала -> строка адреса (в прошлой версии это был словарь {"addr": ...})."""
+    addr = x.get("addr", "") if isinstance(x, dict) else x
+    return str(addr).strip()[:200]
+
+
 def clean_settings(src):
     """Оставляет только известные ключи нужного типа и размера."""
     out = {}
@@ -88,17 +97,23 @@ def clean_settings(src):
         if key not in src:
             continue
         v = src[key]
+        if key == "targets":
+            if isinstance(v, list):
+                out[key] = [t for t in (norm_target(x) for x in v[:2000]) if t]
+            continue
         if isinstance(default, list):
             if isinstance(v, list):
-                out[key] = [str(x)[:200] for x in v[:2000]]
+                lim = 70000 if key == "skips" else 2000
+                out[key] = [str(x).strip()[:64] for x in v[:lim] if str(x).strip()]
         elif isinstance(v, (str, int, float)):
             out[key] = str(v)[:20000]
     if out.get("auto_unit") not in (None, "soat", "daqiqa"):
         out["auto_unit"] = "soat"
     if out.get("theme") not in (None, "", "light", "dark"):
         out["theme"] = ""
-    if out.get("sound") not in (None, "0", "1"):
-        out["sound"] = "1"
+    for k in ("sound", "add_proxy", "auto_proxy"):
+        if out.get(k) not in (None, "0", "1"):
+            out[k] = "1"
     return out
 
 
@@ -181,13 +196,61 @@ def _decode_best(raw):
     return raw.decode("utf-8", errors="replace")
 
 
+# ── Полная остановка: флаг + убийство запущенных процессов и сокетов ──────────
+CANCEL = threading.Event()
+_PROCS = set()
+_SOCKS = set()
+_KILL_LOCK = threading.Lock()
+
+
+class JobCancelled(Exception):
+    """Операция прервана кнопкой «Стоп»."""
+
+
+def cancel_job():
+    """Немедленно прерывает всё: новые запросы не стартуют, активные reg/sc убиваются."""
+    CANCEL.set()
+    with _KILL_LOCK:
+        procs, socks = list(_PROCS), list(_SOCKS)
+    for p in procs:
+        try:
+            p.kill()
+        except Exception:
+            pass
+    for s in socks:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
 def _run(args, timeout=8):
+    if CANCEL.is_set():
+        raise JobCancelled()
     try:
-        r = subprocess.run(args, capture_output=True, timeout=timeout,
-                           creationflags=CREATE_NO_WINDOW)
-        return _decode_best(r.stdout), r.returncode
+        p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW)
     except Exception:
         return "", -1
+    with _KILL_LOCK:
+        _PROCS.add(p)
+    try:
+        if CANCEL.is_set():          # «Стоп» нажат между проверкой и регистрацией
+            p.kill()
+        try:
+            out, _ = p.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.communicate()
+            return "", -1
+        except Exception:
+            return "", -1
+    finally:
+        with _KILL_LOCK:
+            _PROCS.discard(p)
+    if CANCEL.is_set():
+        raise JobCancelled()
+    return _decode_best(out), p.returncode
 
 
 def _local_ips():
@@ -212,15 +275,28 @@ def is_local(ip):
 def reachable(ip, timeout=2.0):
     """Проверяет, открыты ли порты SMB/RPC, нужные для удалённого реестра."""
     for p in (445, 135):
+        if CANCEL.is_set():
+            raise JobCancelled()
+        s = None
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(timeout)
+            with _KILL_LOCK:
+                _SOCKS.add(s)
             rc = s.connect_ex((ip, p))
-            s.close()
             if rc == 0:
                 return True
         except Exception:
             pass
+        finally:
+            with _KILL_LOCK:
+                _SOCKS.discard(s)
+            try:
+                s.close()
+            except Exception:
+                pass
+        if CANCEL.is_set():
+            raise JobCancelled()
     return False
 
 
@@ -259,6 +335,24 @@ def parse_targets(text):
             seen.add(x)
             res.append(x)
     return res
+
+
+def expand_targets(targets):
+    """Список записей -> список IP без повторов."""
+    if isinstance(targets, str):
+        targets = [targets]
+    ips, seen = [], set()
+    for t in targets or []:
+        addr = norm_target(t)
+        if not addr:
+            continue
+        for ip in parse_targets(addr):
+            if ip not in seen:
+                seen.add(ip)
+                ips.append(ip)
+        if len(ips) > MAX_TARGETS:
+            raise ValueError(f"Адресов больше {MAX_TARGETS}")
+    return ips
 
 
 def split_entries(text):
@@ -420,13 +514,14 @@ def _remote_prepare(ip, timeout):
     return sids, None
 
 
-def proxy_add(ip, entries, timeout=5.0):
+def proxy_add(ip, entries, timeout=5.0, enable=True):
+    """enable=True — сначала включить прокси, потом добавить; False — только добавить исключения."""
     entries = [e.strip() for e in entries if e.strip()]
     if not entries:
         return True, "Нет записей для добавления"
-    # Сначала включаем прокси, и только потом добавляем исключения.
+    # Сначала (если нужно) включаем прокси, и только потом добавляем исключения.
     if is_local(ip):
-        st = _local_enable_proxy()
+        st = _local_enable_proxy() if enable else "skip"
         if st == "fail":
             return False, "Не удалось включить прокси — исключения не добавлены"
         pre = _enable_prefix([st])
@@ -446,7 +541,7 @@ def proxy_add(ip, entries, timeout=5.0):
         return False, err
     all_added, states, fail = [], [], 0
     for sid in sids:
-        st = _remote_enable_proxy(ip, sid, timeout)
+        st = _remote_enable_proxy(ip, sid, timeout) if enable else "skip"
         states.append(st)
         if st == "fail":
             fail += 1
@@ -544,7 +639,7 @@ def local_proxy_set(enable=None, server=None, override=None):
 #  ЗАДАЧИ и АВТО-ТАЙМЛАЙН
 # ═════════════════════════════════════════════════════════════════════════════
 TOOLS = {
-    "proxy_add":    ("Прокси: добавить",  lambda ip, p, t: proxy_add(ip, p["entries"], t)),
+    "proxy_add":    ("Прокси: добавить",  lambda ip, p, t: proxy_add(ip, p["entries"], t, p.get("enable", True))),
     "proxy_remove": ("Прокси: удалить",   lambda ip, p, t: proxy_remove(ip, p["entries"], t)),
     "proxy_read":   ("Прокси: прочитать", lambda ip, p, t: proxy_read(ip, t)),
 }
@@ -553,22 +648,32 @@ JOB = {"running": False, "name": "", "done": 0, "total": 0, "ok": 0, "skip": 0, 
 _JOB_LOCK = threading.Lock()
 
 
-def run_over_targets(tool, ips, params, workers, timeout, prefix=""):
+def run_over_targets(tool, items, params, workers, timeout, prefix=""):
+    """items — список IP; params["enable"] — включать ли прокси перед добавлением исключений."""
     title, fn = TOOLS[tool]
-    log("head", f"== {prefix}{title} | адресов: {len(ips)} | потоков: {workers} ==")
+    log("head", f"== {prefix}{title} | адресов: {len(items)} | потоков: {workers} ==")
     ok_n = skip_n = err_n = 0
 
     def task(ip):
+        if CANCEL.is_set():
+            return ip, None, ""
         try:
             ok, msg = fn(ip, params, timeout)
+        except JobCancelled:
+            return ip, None, ""
         except Exception as e:  # один адрес не должен ронять весь цикл
             ok, msg = False, f"Исключение: {e}"
         return ip, ok, msg
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = [ex.submit(task, ip) for ip in ips]
+    ex = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futs = [ex.submit(task, ip) for ip in items]
         for f in as_completed(futs):
+            if f.cancelled():
+                continue
             ip, ok, msg = f.result()
+            if ok is None:                 # прервано — в журнал и счётчики не пишем
+                continue
             if not ok:
                 lv = "err"; err_n += 1
             elif NOCHG in msg:
@@ -579,19 +684,51 @@ def run_over_targets(tool, ips, params, workers, timeout, prefix=""):
             with _JOB_LOCK:
                 JOB["done"] += 1
                 JOB["ok"], JOB["skip"], JOB["err"] = ok_n, skip_n, err_n
-    log("head", f"-> успешно: {ok_n} | без изменений: {skip_n} | ошибок: {err_n}")
+    finally:
+        ex.shutdown(wait=True, cancel_futures=True)
+    if CANCEL.is_set():
+        log("warn", f"-> ОСТАНОВЛЕНО | успешно: {ok_n} | без изменений: {skip_n} | ошибок: {err_n}")
+    else:
+        log("head", f"-> успешно: {ok_n} | без изменений: {skip_n} | ошибок: {err_n}")
     return ok_n, skip_n, err_n
 
 
-def start_job(tool, ips, params, workers, timeout):
+def _wait_job_idle(seconds=5.0):
+    """После «Стоп» активные процессы убиваются за доли секунды — ждём, пока задача освободит слот."""
+    end = datetime.now() + timedelta(seconds=seconds)
+    while datetime.now() < end:
+        with _JOB_LOCK:
+            if not JOB["running"]:
+                return True
+        threading.Event().wait(0.05)
+    return False
+
+
+def apply_skips(items):
+    """Убирает адреса из списка «пропускать» (читается при каждом запуске, поэтому действует и в автообновлении).
+    -> (оставшиеся, сколько убрано)"""
+    skips = set(load_settings().get("skips") or [])
+    if not skips:
+        return items, 0
+    kept = [ip for ip in items if ip not in skips]
+    return kept, len(items) - len(kept)
+
+
+def start_job(tool, items, params, workers, timeout):
+    items, n_skip = apply_skips(items)
+    if not items:
+        return False, "Все адреса отмечены как пропускаемые — делать нечего"
     with _JOB_LOCK:
         if JOB["running"]:
             return False, "Уже выполняется другая задача"
-        JOB.update(running=True, name=TOOLS[tool][0], done=0, total=len(ips), ok=0, skip=0, err=0)
+        CANCEL.clear()
+        JOB.update(running=True, name=TOOLS[tool][0], done=0, total=len(items), ok=0, skip=0, err=0)
 
     def runner():
         try:
-            run_over_targets(tool, ips, params, workers, timeout)
+            if n_skip:
+                log("info", f"Пропущено адресов из списка исключённых: {n_skip}")
+            run_over_targets(tool, items, params, workers, timeout)
         finally:
             with _JOB_LOCK:
                 JOB["running"] = False
@@ -610,7 +747,7 @@ class AutoTimeline:
         self.cfg = None
         self.last = ""
         self.initial_delay = 0
-        self._stop = threading.Event()
+        self._stop = threading.Event()      # у каждого запуска свой — старый цикл не оживает
         self._lock = threading.Lock()
 
     def start(self, cfg, raw=None, restored=False):
@@ -619,67 +756,84 @@ class AutoTimeline:
         with self._lock:
             if self.running:
                 return False, "Автообновление уже запущено"
+        if CANCEL.is_set() and not _wait_job_idle():
+            return False, "Предыдущая задача ещё останавливается, повторите"
+        with self._lock:
+            if self.running:
+                return False, "Автообновление уже запущено"
             self.running, self.cycle, self.cfg, self.last = True, 0, cfg, ""
             self.initial_delay = 15 if restored else 0   # дать сети подняться после загрузки
-            self._stop.clear()
+            self._stop = stop = threading.Event()
         if not restored:
             save_auto_state(True, raw)
-        threading.Thread(target=self._loop, daemon=True).start()
+        threading.Thread(target=self._loop, args=(stop,), daemon=True).start()
         unit = "ч" if cfg["unit"] == "soat" else "мин"
         src = "ВОССТАНОВЛЕНО после перезапуска" if restored else "ЗАПУЩЕНО"
         log("info", f"Автообновление {src}: каждые {cfg['every']} {unit} ({TOOLS[cfg['tool']][0]})")
         return True, "Запущено"
 
     def stop(self, persist=True):
-        """persist=False — это выход программы, а не команда пользователя:
+        """Полная остановка: цикл завершается, текущая задача прерывается, reg/sc убиваются.
+        persist=False — это выход программы, а не команда пользователя:
         флаг «работало» остаётся в файле, и при следующем старте цикл возобновится."""
         with self._lock:
             was = self.running
             self.running = False
             self.next_ts = None
-        self._stop.set()
+            stop = self._stop
+        with _JOB_LOCK:
+            stop.set()
+        cancel_job()
         if persist:
             save_auto_state(False, None)
             if was:
                 log("info", "Автообновление ОСТАНОВЛЕНО")
 
-    def _loop(self):
+    def _loop(self, stop):
         c = self.cfg
         secs = max(1, int(c["every"])) * (3600 if c["unit"] == "soat" else 60)
-        if self.initial_delay and self._stop.wait(self.initial_delay):
-            self.running = False
+        if self.initial_delay and stop.wait(self.initial_delay):
             return
-        while self.running:
+        while not stop.is_set():
             self.cycle += 1
+            items, n_skip = apply_skips(c["items"])
             with _JOB_LOCK:
                 busy = JOB["running"]
+                started = not busy and not stop.is_set() and bool(items)
+                if started:
+                    CANCEL.clear()
+                    JOB.update(running=True, name=f"АВТО №{self.cycle}: {TOOLS[c['tool']][0]}",
+                               done=0, total=len(items), ok=0, skip=0, err=0)
             if busy:
                 log("warn", f"Цикл №{self.cycle}: выполняется другая задача — пропущен")
-            else:
-                with _JOB_LOCK:
-                    JOB.update(running=True, name=f"АВТО №{self.cycle}: {TOOLS[c['tool']][0]}",
-                               done=0, total=len(c["ips"]), ok=0, skip=0, err=0)
+            elif not items:
+                log("warn", f"Цикл №{self.cycle}: все адреса отмечены как пропускаемые — пропущен")
+            elif started:
                 try:
-                    o, s, e = run_over_targets(c["tool"], c["ips"], c["params"], c["workers"],
+                    if n_skip:
+                        log("info", f"Цикл №{self.cycle}: пропущено адресов из списка исключённых: {n_skip}")
+                    o, s, e = run_over_targets(c["tool"], items, c["params"], c["workers"],
                                                c["timeout"], prefix=f"Цикл №{self.cycle} | ")
-                    self.last = f"№{self.cycle}: обновлено {o}, без изменений {s}, ошибок {e}"
+                    if not stop.is_set():
+                        self.last = f"№{self.cycle}: обновлено {o}, без изменений {s}, ошибок {e}"
                 finally:
                     with _JOB_LOCK:
                         JOB["running"] = False
-            if not self.running:
+            if stop.is_set():
                 break
             self.next_ts = (datetime.now() + timedelta(seconds=secs)).timestamp()
-            if self._stop.wait(secs):
+            if stop.wait(secs):
                 break
-        self.running = False
-        self.next_ts = None
+        if self._stop is stop:
+            self.running = False
+            self.next_ts = None
 
     def state(self):
         return {"running": self.running, "cycle": self.cycle, "next_ts": self.next_ts,
                 "last": self.last,
                 "cfg": None if not self.cfg else {
                     "tool": self.cfg["tool"], "every": self.cfg["every"], "unit": self.cfg["unit"],
-                    "targets": len(self.cfg["ips"])}}
+                    "targets": len(self.cfg["items"])}}
 
 
 AUTO = AutoTimeline()
@@ -689,11 +843,8 @@ def build_request(body):
     tool = body.get("tool", "")
     if tool not in TOOLS:
         raise ValueError("Неизвестная операция")
-    targets = body.get("targets", "")
-    if isinstance(targets, list):
-        targets = "\n".join(str(t) for t in targets)
-    ips = parse_targets(targets)
-    if not ips:
+    items = expand_targets(body.get("targets", []))
+    if not items:
         raise ValueError("Добавьте хотя бы один адрес")
     entries = split_entries(body.get("entries", ""))
     if tool in ("proxy_add", "proxy_remove") and not entries:
@@ -706,12 +857,12 @@ def build_request(body):
         timeout = max(1.0, float(body.get("timeout", 5)))
     except (TypeError, ValueError):
         timeout = 5.0
-    return tool, ips, {"entries": entries}, workers, timeout
+    return tool, items, {"entries": entries, "enable": body.get("proxy_on") is not False}, workers, timeout
 
 
 def auto_cfg_from_body(body):
     """-> (cfg для AutoTimeline, raw для сохранения в AppData)"""
-    tool, ips, params, workers, timeout = build_request(body)
+    tool, items, params, workers, timeout = build_request(body)
     if tool != "proxy_add":
         raise ValueError("Эта операция не подходит для автообновления")
     unit = body.get("unit") if body.get("unit") in ("soat", "daqiqa") else "soat"
@@ -719,13 +870,14 @@ def auto_cfg_from_body(body):
         every = max(1, int(body.get("every", 1)))
     except (TypeError, ValueError):
         every = 1
-    cfg = {"tool": tool, "ips": ips, "params": params, "workers": workers,
+    cfg = {"tool": tool, "items": items, "params": params, "workers": workers,
            "timeout": timeout, "every": every, "unit": unit}
     targets = body.get("targets", "")
     if isinstance(targets, list):
-        targets = [str(t)[:200] for t in targets[:2000]]
+        targets = [norm_target(t) for t in targets[:2000]]
     raw = {"tool": tool, "targets": targets, "entries": str(body.get("entries", ""))[:20000],
-           "workers": workers, "timeout": timeout, "every": every, "unit": unit}
+           "workers": workers, "timeout": timeout, "every": every, "unit": unit,
+           "proxy_on": params["enable"]}
     return cfg, raw
 
 
@@ -901,7 +1053,48 @@ textarea{resize:none;min-height:80px}
 .li{display:flex;align-items:center;gap:10px;padding:7px 8px 7px 13px;border-radius:var(--r-s);background:var(--bg);
   box-shadow:var(--raise-s);flex:0 0 auto}
 .li .addr{flex:1;min-width:0;font:13px Consolas,"Cascadia Mono",monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.li{cursor:pointer;user-select:none;transition:box-shadow .15s,color .15s}
 .li .cnt{color:var(--sub);font-size:12px;white-space:nowrap}
+.li .cnt b{color:var(--err);font-weight:600}
+
+.bw{display:inline-flex;align-items:center;gap:8px}
+.pxi{border:0;border-radius:99px;background:var(--bg);box-shadow:var(--sink-s);color:var(--sub);cursor:pointer;
+  padding:5px 11px 5px 24px;font:600 12px inherit;white-space:nowrap;position:relative;overflow:hidden;transition:color .2s}
+.pxi::before{content:"";position:absolute;left:10px;top:50%;width:8px;height:8px;margin-top:-4px;border-radius:50%;
+  background:var(--skip);transition:background .2s,box-shadow .2s}
+.pxi.on{color:var(--ok)}
+.pxi.on::before{background:var(--ok);box-shadow:0 0 7px var(--ok)}
+
+/* ── контекстное меню (ПКМ по интервалу) ── */
+.ctx{position:fixed;z-index:80;min-width:260px;padding:8px;margin:0;list-style:none;background:var(--bg);
+  border-radius:var(--r-s);box-shadow:var(--raise);animation:ddIn .16s cubic-bezier(.2,.8,.2,1)}
+.ctx .it{position:relative;overflow:hidden;display:flex;align-items:center;gap:10px;padding:8px 14px;border-radius:10px;
+  cursor:pointer;font-size:13.5px;white-space:nowrap;transition:color .15s}
+.ctx .it:hover,.ctx .it:focus-visible{color:var(--acc);box-shadow:var(--sink-s);outline:0}
+.ctx .it.danger{color:var(--err)}
+.ctx .it .ck{width:16px;text-align:center;color:var(--acc);flex:0 0 auto}
+.ctx .sep{height:1px;margin:6px 8px;background:var(--lo);opacity:.6}
+
+/* ── окно редактирования интервала ── */
+#modal,#skipModal{position:fixed;inset:0;z-index:90;display:grid;place-items:center;background:rgba(0,0,0,.28)}
+#modal .card,#skipModal .card{width:min(440px,92vw);animation:pop .3s cubic-bezier(.3,1.4,.5,1)}
+#skipModal .card{width:min(820px,94vw);max-height:86vh;display:flex;flex-direction:column;padding:0}
+.skhead{flex:0 0 auto;padding:16px 18px 12px;border-bottom:1px solid color-mix(in srgb,var(--lo) 55%,transparent)}
+.skhead h2{margin:0 0 4px}
+.skhead .hint{margin:0 0 10px}
+.skhead .btns{margin-top:10px}
+.sklist{flex:1 1 auto;min-height:120px;overflow:auto;padding:12px 18px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-content:start}
+.sklist>.btn,.sklist>.empty{grid-column:1/-1;justify-self:center}
+@media (max-width:640px){.sklist{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.skrow{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 10px 6px 14px;border-radius:var(--r-s);
+  box-shadow:var(--raise-s);min-width:0;cursor:pointer}
+.skrow .ip{font:13px Consolas,"Cascadia Mono",monospace}
+.skrow.on{box-shadow:var(--sink-s)}
+.skrow.on .ip{color:var(--err);text-decoration:line-through}
+.skrow .sw{flex:0 0 auto}
+.skfoot{flex:0 0 auto;display:flex;align-items:center;gap:12px;padding:12px 18px 16px;border-top:1px solid color-mix(in srgb,var(--lo) 55%,transparent)}
+.skfoot .hint{flex:1;margin:0}
+#modal .err{min-height:18px;margin:8px 0 0;font-size:12.5px}
 .li button{width:26px;height:26px;border:0;border-radius:50%;background:var(--bg);color:var(--err);
   box-shadow:var(--sink-s);cursor:pointer;line-height:1;font-size:12px;flex:0 0 auto;position:relative;overflow:hidden;transition:transform .12s}
 .li button:active{transform:scale(.86)}
@@ -1029,7 +1222,7 @@ textarea{resize:none;min-height:80px}
         <label for="entries" style="margin-top:0">Записи через «;» или с новой строки</label>
         <textarea id="entries" placeholder="*.local; 10.145.*; &lt;local&gt;"></textarea>
         <div class="btns">
-          <button class="btn main" id="b_add">Добавить</button>
+          <span class="bw"><button class="btn main" id="b_add" title="Правая кнопка — включать ли прокси">Добавить</button><button type="button" class="pxi" id="i_add" title="Нажмите, чтобы переключить"></button></span>
           <button class="btn danger" id="b_rm">Удалить</button>
           <button class="btn" id="b_rd">Прочитать текущие</button>
         </div>
@@ -1047,7 +1240,7 @@ textarea{resize:none;min-height:80px}
             </div></div>
         </div>
         <div class="btns">
-          <button class="btn main" id="a_start">Запустить</button>
+          <span class="bw"><button class="btn main" id="a_start" title="Правая кнопка — включать ли прокси">Запустить</button><button type="button" class="pxi" id="i_auto" title="Нажмите, чтобы переключить"></button></span>
           <button class="btn danger" id="a_stop" disabled>Остановить</button>
         </div>
         <div class="kv" id="a_state" style="margin-top:10px">Остановлено</div>
@@ -1086,6 +1279,7 @@ textarea{resize:none;min-height:80px}
       <h2 style="margin-bottom:6px">Текущая задача</h2>
       <div class="kv" id="jobtxt">Нет активных задач</div>
       <div class="track"><i id="jobbar"></i></div>
+      <div class="btns"><button class="btn danger" id="j_stop" disabled>Стоп (прервать всё)</button></div>
     </div>
     <div class="card logcard">
       <div class="logbar">
@@ -1108,13 +1302,39 @@ textarea{resize:none;min-height:80px}
   </div>
 </main>
 </div>
+<div id="modal" hidden>
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="m_title">
+    <h2 id="m_title">Изменить интервал</h2>
+    <div class="row">
+      <div><label for="m_from" style="margin-top:0">Начальный IP / адрес</label><input type="text" id="m_from" autocomplete="off"></div>
+      <div><label for="m_to" style="margin-top:0">Конечный IP</label><input type="text" id="m_to" autocomplete="off"></div>
+    </div>
+    <p class="err" id="m_err"></p>
+    <div class="btns"><button class="btn main" id="m_ok">Сохранить</button><button class="btn" id="m_cancel">Отмена</button></div>
+  </div>
+</div>
+<div id="skipModal" hidden>
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="k_title">
+    <div class="skhead">
+      <h2 id="k_title">IP интервала</h2>
+      <p class="hint">Отмеченные адреса будут пропущены: ни добавление, ни автообновление к ним не обращается.</p>
+      <input type="text" id="k_q" placeholder="Поиск по IP" aria-label="Поиск по IP" autocomplete="off">
+      <div class="btns">
+        <button class="btn sm danger" id="k_skip">Пропускать найденные</button>
+        <button class="btn sm" id="k_unskip">Не пропускать найденные</button>
+      </div>
+    </div>
+    <div class="sklist" id="k_list"></div>
+    <div class="skfoot"><p class="hint" id="k_info"></p><button class="btn main" id="k_done">Готово</button></div>
+  </div>
+</div>
 <div id="toast" role="alert"></div>
 
 <script>
 const $=id=>document.getElementById(id);
 const H={'X-Requested-With':'ProxyTool','Content-Type':'application/json'};
 const api=(u,b)=>fetch(u,b===undefined?{headers:H}:{method:'POST',headers:H,body:JSON.stringify(b)}).then(r=>r.json());
-let S={targets:[],entries:'',workers:'50',timeout:'5',auto_every:'1',auto_unit:'soat',lp_server:'',lp_override:'',theme:'',sound:'1'};
+let S={targets:[],skips:[],add_proxy:'1',auto_proxy:'1',entries:'',workers:'50',timeout:'5',auto_every:'1',auto_unit:'soat',lp_server:'',lp_override:'',theme:'',sound:'1'};
 let lastId=0, all=[], lpOn=0, toastT, popIdx=-1;
 
 function toast(m){snd('err');const t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),4500)}
@@ -1208,23 +1428,120 @@ function info(t){let m=t.match(/^(\d+\.\d+\.\d+\.\d+)-(.+)$/);
   m=t.match(/^(\S+)\/(\d+)$/);
   if(m&&+m[2]<=32){const n=Math.max(1,Math.pow(2,32-+m[2])-2);return{text:t,n}}
   return{text:t,n:1}}
+/* Интервал = строка адреса. Правая кнопка по нему: только «Изменить» и «Удалить». */
+const normT=t=>String(t&&t.addr!==undefined?t.addr:t||'').trim();
 function renderChips(){const box=$('chips');box.textContent='';let total=0;const pi=popIdx;popIdx=-1;
   if(!S.targets.length){const e=document.createElement('div');e.className='empty';e.textContent='Список пуст. Добавьте диапазон или адрес.';box.append(e)}
   S.targets.forEach((t,i)=>{const f=info(t);total+=f.n;
     const c=document.createElement('div');c.className='li'+(i===pi?' pop':'');
+    c.title='Двойной клик — выбрать пропускаемые IP; правая кнопка — изменить / удалить';
     const a=document.createElement('span');a.className='addr';a.textContent=f.text;a.title=f.text;
     const n=document.createElement('span');n.className='cnt';n.textContent=f.n+' '+plural(f.n,['адрес','адреса','адресов']);
+    const sk=skipCount(t);if(sk){const x=document.createElement('b');x.textContent=sk;n.append(' · пропуск: ',x)}
     const b=document.createElement('button');b.textContent='✕';b.title='Убрать';b.setAttribute('aria-label','Убрать '+f.text);
-    b.onclick=()=>{snd('del');c.classList.add('out');setTimeout(()=>{const k=S.targets.indexOf(t);if(k>=0)S.targets.splice(k,1);renderChips();save()},190)};c.append(a,n,b);box.append(c)});
+    b.onclick=()=>delTarget(t,c);
+    c.ondblclick=()=>openSkip(t);
+    c.oncontextmenu=e=>{e.preventDefault();showCtx(e.clientX,e.clientY,[
+      {l:'Изменить…',f:()=>editTarget(t)},{l:'Удалить',danger:true,f:()=>delTarget(t)}])};
+    c.append(a,n,b);box.append(c)});
   $('tcount').textContent=S.targets.length?`Записей: ${S.targets.length}, всего адресов: ${total}`:''}
+function delTarget(t,el){snd('del');if(el)el.classList.add('out');
+  setTimeout(()=>{const k=S.targets.indexOf(t);if(k>=0)S.targets.splice(k,1);renderChips();save()},el?190:0)}
 function addTarget(v){if(!S.targets.includes(v)){snd('add');S.targets.push(v);popIdx=S.targets.length-1;renderChips();save();const l=$('chips');l.scrollTop=l.scrollHeight}}
-$('addRange').onclick=()=>{const a=$('ip_from').value.trim(),b=$('ip_to').value.trim();
-  if(!a)return toast('Введите начальный IP');
-  if(b){if(!okIp(a)||!okIp(b))return toast('Диапазон задаётся двумя корректными IPv4-адресами');addTarget(a+'-'+b)}
-  else addTarget(a);
+function buildAddr(a,b){if(!a)return{err:'Введите начальный IP'};
+  if(b){if(!okIp(a)||!okIp(b))return{err:'Диапазон задаётся двумя корректными IPv4-адресами'};return{addr:a+'-'+b}}
+  return{addr:a}}
+$('addRange').onclick=()=>{const r=buildAddr($('ip_from').value.trim(),$('ip_to').value.trim());
+  if(r.err)return toast(r.err);
+  addTarget(r.addr);
   $('ip_from').value='';$('ip_to').value='';$('ip_from').focus()};
 ['ip_from','ip_to'].forEach(id=>$(id).addEventListener('keydown',e=>{if(e.key==='Enter')$('addRange').click()}));
 $('addLocal').onclick=()=>addTarget('localhost');
+
+/* ── пропускаемые IP: двойной клик по интервалу ── */
+const skipSet=new Set();
+const intIp=i=>[Math.floor(i/16777216)%256,(i>>>16)&255,(i>>>8)&255,i&255].join('.');
+function ipsOf(t){const CAP=65536;let m=t.match(/^(\d+\.\d+\.\d+\.\d+)-(.+)$/);
+  if(m){let e=m[2];if(!e.includes('.'))e=m[1].split('.').slice(0,3).concat(e).join('.');
+    if(okIp(m[1])&&okIp(e)){let x=ipInt(m[1]),y=ipInt(e);if(x>y)[x,y]=[y,x];const r=[];for(let i=x;i<=y&&r.length<CAP;i++)r.push(intIp(i));return r}}
+  m=t.match(/^(\S+)\/(\d+)$/);
+  if(m&&okIp(m[1])&&+m[2]<=32){const p=+m[2],size=2**(32-p),st=Math.floor(ipInt(m[1])/size)*size,r=[];
+    const a=p>=31?st:st+1,b=p>=31?st+size-1:st+size-2;for(let i=a;i<=b&&r.length<CAP;i++)r.push(intIp(i));return r}
+  return [t]}
+function skipCount(t){if(!skipSet.size)return 0;let n=0;for(const ip of ipsOf(t))if(skipSet.has(ip))n++;return n}
+function saveSkips(){S.skips=[...skipSet];save()}
+let skipIps=[],skipFound=[],skipLim=500,skipTarget='';
+function openSkip(t){skipTarget=t;skipIps=ipsOf(t);skipLim=500;$('k_q').value='';$('k_title').textContent='IP интервала: '+info(t).text;
+  $('skipModal').hidden=false;renderSkip();$('k_q').focus()}
+function closeSkip(){$('skipModal').hidden=true;saveSkips();renderChips()}
+function paintSkipInfo(){let n=0;for(const ip of skipIps)if(skipSet.has(ip))n++;
+  $('k_info').textContent=`Найдено: ${skipFound.length} из ${skipIps.length} · пропускается: ${n}`}
+function renderSkip(){const q=$('k_q').value.trim().toLowerCase(),box=$('k_list');
+  skipFound=q?skipIps.filter(ip=>ip.toLowerCase().includes(q)):skipIps;box.textContent='';
+  for(const ip of skipFound.slice(0,skipLim)){
+    const r=document.createElement('label');r.className='skrow sw'+(skipSet.has(ip)?' on':'');
+    const i=document.createElement('input');i.type='checkbox';i.checked=skipSet.has(ip);
+    const tr=document.createElement('span');tr.className='trk';
+    const a=document.createElement('span');a.className='ip';a.textContent=ip;
+    r.append(a,i,tr);
+    i.onchange=()=>{i.checked?skipSet.add(ip):skipSet.delete(ip);r.classList.toggle('on',i.checked);snd(i.checked?'del':'pick');paintSkipInfo();saveSkips()};
+    box.append(r)}
+  if(skipFound.length>skipLim){const m=document.createElement('button');m.className='btn sm';m.style.flex='0 0 auto';
+    m.textContent=`Показать ещё (осталось ${skipFound.length-skipLim})`;m.onclick=()=>{skipLim+=500;renderSkip()};box.append(m)}
+  if(!skipFound.length){const e=document.createElement('div');e.className='empty';e.textContent='Ничего не найдено';box.append(e)}
+  paintSkipInfo()}
+$('k_q').oninput=()=>{skipLim=500;renderSkip();$('k_list').scrollTop=0};
+$('k_skip').onclick=()=>{skipFound.forEach(ip=>skipSet.add(ip));snd('del');renderSkip();saveSkips()};
+$('k_unskip').onclick=()=>{skipFound.forEach(ip=>skipSet.delete(ip));snd('pick');renderSkip();saveSkips()};
+$('k_done').onclick=closeSkip;
+$('skipModal').addEventListener('mousedown',e=>{if(e.target===$('skipModal'))closeSkip()});
+$('skipModal').addEventListener('keydown',e=>{if(e.key==='Escape')closeSkip()});
+
+/* ── контекстное меню: rows = [{l, ck?, danger?, f}] ── */
+let ctxEl=null;
+function closeCtx(){if(ctxEl){ctxEl.remove();ctxEl=null}}
+function showCtx(x,y,rows){closeCtx();const m=document.createElement('ul');m.className='ctx';m.setAttribute('role','menu');
+  rows.forEach(r=>{const li=document.createElement('li');
+    li.className='it'+(r.danger?' danger':'');li.tabIndex=0;li.setAttribute('role','menuitem');
+    const ck=document.createElement('span');ck.className='ck';ck.textContent=r.ck?'●':(r.ck===false?'○':'');
+    li.append(ck,document.createTextNode(r.l));
+    li.onclick=()=>{closeCtx();r.f()};
+    li.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();li.click()}
+      else if(e.key==='ArrowDown'){e.preventDefault();li.nextElementSibling?.focus()}
+      else if(e.key==='ArrowUp'){e.preventDefault();li.previousElementSibling?.focus()}};
+    m.append(li)});
+  document.body.append(m);ctxEl=m;
+  m.style.left=Math.max(8,Math.min(x,innerWidth-m.offsetWidth-8))+'px';
+  m.style.top=Math.max(8,Math.min(y,innerHeight-m.offsetHeight-8))+'px';
+  m.querySelector('.it')?.focus()}
+document.addEventListener('mousedown',e=>{if(ctxEl&&!ctxEl.contains(e.target))closeCtx()});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeCtx()});
+addEventListener('resize',closeCtx);addEventListener('blur',closeCtx);document.addEventListener('scroll',closeCtx,true);
+document.addEventListener('contextmenu',e=>{if(!e.target.closest('.li,.ctx,#b_add,#a_start'))closeCtx()});
+
+/* ── «Добавить» и «Запустить»: ПКМ или индикатор переключают «включать прокси» ── */
+const PX=[['b_add','i_add','add_proxy'],['a_start','i_auto','auto_proxy']];
+function paintPx(){PX.forEach(([,i,k])=>{const on=S[k]!=='0',el=$(i);el.classList.toggle('on',on);
+  el.textContent=on?'прокси: вкл':'прокси: выкл';el.setAttribute('aria-pressed',on)})}
+function togglePx(k){S[k]=S[k]==='0'?'1':'0';paintPx();save();snd(S[k]==='0'?'off':'on')}
+PX.forEach(([b,i,k])=>{$(i).onclick=()=>togglePx(k);
+  $(b).addEventListener('contextmenu',e=>{e.preventDefault();
+    showCtx(e.clientX,e.clientY,[{l:'Включать прокси',ck:S[k]!=='0',f:()=>togglePx(k)}])})});
+
+/* ── редактирование интервала ── */
+let editing=null;
+function editTarget(t){editing=t;const m=t.match(/^(\d+\.\d+\.\d+\.\d+)-(.+)$/);let a=t,b='';
+  if(m){a=m[1];b=m[2].includes('.')?m[2]:m[1].split('.').slice(0,3).concat(m[2]).join('.')}
+  $('m_from').value=a;$('m_to').value=b;$('m_err').textContent='';$('modal').hidden=false;$('m_from').focus();$('m_from').select()}
+function closeEdit(){$('modal').hidden=true;editing=null}
+function saveEdit(){const r=buildAddr($('m_from').value.trim(),$('m_to').value.trim());
+  if(r.err){$('m_err').textContent=r.err;snd('err');return}
+  if(r.addr!==editing&&S.targets.includes(r.addr)){$('m_err').textContent='Такой интервал уже есть в списке';snd('err');return}
+  const k=S.targets.indexOf(editing);if(k>=0)S.targets[k]=r.addr;
+  closeEdit();snd('ok');renderChips();save()}
+$('m_ok').onclick=saveEdit;$('m_cancel').onclick=closeEdit;
+$('modal').addEventListener('mousedown',e=>{if(e.target===$('modal'))closeEdit()});
+$('modal').addEventListener('keydown',e=>{if(e.key==='Enter')saveEdit();else if(e.key==='Escape')closeEdit()});
 
 /* ── вкладки ── */
 function moveThumb(instant){const b=document.querySelector('#seg [aria-selected=true]'),t=$('segThumb');if(!b)return;
@@ -1240,9 +1557,11 @@ $('seg').onclick=e=>{const t=e.target.dataset.t;if(!t)return;
 /* ── запуск операций ── */
 const req=tool=>({tool,targets:S.targets,entries:$('entries').value,workers:$('workers').value,timeout:$('timeout').value});
 function flash(){const c=$('jobtxt').closest('.card');c.classList.remove('flash');void c.offsetWidth;c.classList.add('flash')}
-async function run(tool){const r=await api('/api/run',req(tool));if(!r.ok)toast(r.error);else{flash();snd('ok')}poll()}
+async function run(tool){const p=req(tool);if(tool==='proxy_add')p.proxy_on=S.add_proxy!=='0';
+  const r=await api('/api/run',p);if(!r.ok)toast(r.error);else{flash();snd('ok')}poll()}
 $('b_add').onclick=()=>run('proxy_add');$('b_rm').onclick=()=>run('proxy_remove');$('b_rd').onclick=()=>run('proxy_read');
-$('a_start').onclick=async()=>{const p=req('proxy_add');p.every=$('a_every').value;p.unit=ddUnit.get();
+$('j_stop').onclick=async()=>{await api('/api/stop',{});snd('del');poll()};
+$('a_start').onclick=async()=>{const p=req('proxy_add');p.proxy_on=S.auto_proxy!=='0';p.every=$('a_every').value;p.unit=ddUnit.get();
   const r=await api('/api/auto/start',p);if(!r.ok)toast(r.error);else{flash();snd('ok')}poll()};
 $('a_stop').onclick=async()=>{await api('/api/auto/stop',{});snd('del');poll()};
 
@@ -1278,7 +1597,7 @@ async function poll(){try{
   const j=s.job;$('jobb').textContent=j.running?'Работает':'Свободен';$('jobb').className='pill '+(j.running?'good':'');
   $('jobtxt').textContent=j.total?`${j.name}: ${j.done} из ${j.total}\nуспешно ${j.ok} · без изменений ${j.skip} · ошибок ${j.err}`:'Нет активных задач';
   $('jobbar').style.width=j.total?Math.round(100*j.done/j.total)+'%':'0';
-  const a=s.auto;$('a_start').disabled=a.running;$('a_stop').disabled=!a.running;
+  const a=s.auto;$('a_start').disabled=a.running;$('a_stop').disabled=!a.running;$('j_stop').disabled=!(j.running||a.running);
   $('a_state').textContent=a.running
     ?`Работает, цикл №${a.cycle}`+(a.next_ts?`, следующий в ${fmt(a.next_ts)}`:' (выполняется)')+(a.last?`\nПоследний: ${a.last}`:'')
     :'Остановлено'+(a.last?`\nПоследний: ${a.last}`:'');
@@ -1288,7 +1607,7 @@ async function poll(){try{
 
 /* ── волна при нажатии ── */
 document.addEventListener('pointerdown',e=>{
-  const el=e.target.closest('.btn,.step,.iconbtn,.dd-btn,.li button,#seg button,.dd-list li');
+  const el=e.target.closest('.btn,.step,.iconbtn,.dd-btn,.li button,#seg button,.dd-list li,.ctx .it,.pxi');
   if(!el||el.disabled)return;
   snd(el.matches('#seg button')?'tab':el.matches('.dd-list li')?'pick':'click');
   if(matchMedia('(prefers-reduced-motion:reduce)').matches)return;
@@ -1299,10 +1618,11 @@ document.addEventListener('pointerdown',e=>{
 
 /* ── старт: подгружаем данные из AppData ── */
 (async()=>{try{const d=await api('/api/settings');Object.assign(S,d)}catch(e){toast('Не удалось прочитать настройки')}
+  S.targets=(S.targets||[]).map(normT).filter(Boolean);(S.skips||[]).forEach(ip=>skipSet.add(ip));
   $('entries').value=S.entries;$('workers').value=S.workers;$('timeout').value=S.timeout;
   $('a_every').value=S.auto_every;ddUnit.set(S.auto_unit,true);$('lp_server').value=S.lp_server;$('lp_override').value=S.lp_override;
   if(S.theme)applyTheme(S.theme);paintSound();
-  renderChips();moveThumb(true);poll();setInterval(poll,1000);
+  renderChips();paintPx();moveThumb(true);poll();setInterval(poll,1000);
   if(location.hash==='#local')document.querySelector('[data-t=local]').click()})();
 </script></body></html>
 """
@@ -1380,15 +1700,19 @@ class Handler(BaseHTTPRequestHandler):
         p = urlparse(self.path).path
         try:
             if p == "/api/run":
-                tool, ips, params, workers, timeout = build_request(body)
-                ok, msg = start_job(tool, ips, params, workers, timeout)
+                tool, items, params, workers, timeout = build_request(body)
+                ok, msg = start_job(tool, items, params, workers, timeout)
                 return self._send(200, {"ok": ok, "error": None if ok else msg})
             if p == "/api/auto/start":
                 cfg, raw = auto_cfg_from_body(body)
                 ok, msg = AUTO.start(cfg, raw)
                 return self._send(200, {"ok": ok, "error": None if ok else msg})
-            if p == "/api/auto/stop":
-                AUTO.stop()
+            if p in ("/api/auto/stop", "/api/stop"):
+                with _JOB_LOCK:
+                    was_busy = JOB["running"]
+                AUTO.stop()                       # цикл + текущая задача + все reg/sc/сокеты
+                if was_busy or p == "/api/stop":
+                    log("warn", "СТОП: все операции прерваны, новые запросы не отправляются")
                 return self._send(200, {"ok": True})
             if p == "/api/logs/clear":
                 clear_logs()
